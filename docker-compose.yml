@@ -1,0 +1,131 @@
+name: gradeflow
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gradeflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
+      POSTGRES_DB: ${POSTGRES_DB:-gradeflow}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.5-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in your local .env}
+    command: ["/bin/sh", "-ec", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment: &gradeflow-env
+      GRADEFLOW_ENVIRONMENT: production
+      GRADEFLOW_SESSION_PEPPER: ${GRADEFLOW_SESSION_PEPPER:?Set GRADEFLOW_SESSION_PEPPER in your local .env}
+      GRADEFLOW_COOKIE_SECURE: ${GRADEFLOW_COOKIE_SECURE:-false}
+      GRADEFLOW_AUTO_CREATE_SCHEMA: "false"
+      GRADEFLOW_DATABASE_URL: postgresql://${POSTGRES_USER:-gradeflow}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gradeflow}
+      GRADEFLOW_RATE_LIMIT_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      GRADEFLOW_CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      GRADEFLOW_CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      #GRADEFLOW_STORAGE_BACKEND: local
+      #GRADEFLOW_STORAGE_DIR: /app/storage/private
+
+      GRADEFLOW_SUPABASE_URL: ${GRADEFLOW_SUPABASE_URL:?Set GRADEFLOW_SUPABASE_URL in .env}
+      GRADEFLOW_SUPABASE_STORAGE_BUCKET: ${GRADEFLOW_SUPABASE_STORAGE_BUCKET:-gradeflow-scans}
+      GRADEFLOW_SUPABASE_SERVICE_ROLE_KEY: ${GRADEFLOW_SUPABASE_SERVICE_ROLE_KEY:?Set GRADEFLOW_SUPABASE_SERVICE_ROLE_KEY in .env}
+      GRADEFLOW_STORAGE_BACKEND: ${GRADEFLOW_STORAGE_BACKEND:-supabase}
+      GRADEFLOW_VISION_BASE_URL: ${GRADEFLOW_VISION_BASE_URL:?Set GRADEFLOW_VISION_BASE_URL in your local .env}
+      GRADEFLOW_VISION_MODEL: ${GRADEFLOW_VISION_MODEL:?Set GRADEFLOW_VISION_MODEL in your local .env}
+      GRADEFLOW_VISION_API_KEY: ${GRADEFLOW_VISION_API_KEY:?Set GRADEFLOW_VISION_API_KEY in your local .env}
+      GRADEFLOW_SMTP_HOST: ${GRADEFLOW_SMTP_HOST:?Set GRADEFLOW_SMTP_HOST in your local .env}
+      GRADEFLOW_SMTP_PORT: ${GRADEFLOW_SMTP_PORT:?Set GRADEFLOW_SMTP_PORT in your local .env}
+      GRADEFLOW_SMTP_USER: ${GRADEFLOW_SMTP_USER:?Set GRADEFLOW_SMTP_USER in your local .env}
+      GRADEFLOW_SMTP_PASSWORD: ${GRADEFLOW_SMTP_PASSWORD:?Set GRADEFLOW_SMTP_PASSWORD in your local .env}
+      GRADEFLOW_EMAIL_FROM: ${GRADEFLOW_EMAIL_FROM:?Set GRADEFLOW_EMAIL_FROM in your local .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      <<: *gradeflow-env
+      GRADEFLOW_FRONTEND_ORIGIN: ${GRADEFLOW_FRONTEND_ORIGIN:-}
+    ports:
+      - "127.0.0.1:8000:3000"
+    volumes:
+      - gradeflow_uploads:/app/storage/private
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      <<: *gradeflow-env
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    volumes:
+      - gradeflow_uploads:/app/storage/private
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: node:22.13.0-bookworm-slim
+    working_dir: /workspace
+    environment:
+      GRADEFLOW_API_PROXY_TARGET: http://api:3000
+    command: ["/bin/sh", "-ec", "npm install -g pnpm@11.25.0 && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 3000"]
+    ports:
+      - "0.0.0.0:3000:3000"
+    volumes:
+      - ./:/workspace
+      - frontend_node_modules:/workspace/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  gradeflow_uploads:
+  frontend_node_modules:

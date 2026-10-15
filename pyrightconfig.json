@@ -1,0 +1,18 @@
+{
+  "include": ["backend"],
+  "exclude": [".venv", "frontend", "node_modules", "data", "storage"],
+  "venvPath": "./",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": "./backend",
+      "extraPaths": [
+        "./backend",
+        "./.venv/lib/python3.12/site-packages"
+      ]
+    }
+  ],
+  "reportMissingImports": true,
+  "reportMissingModuleSource": false
+}
